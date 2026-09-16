@@ -14,4 +14,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 ENV PYTHONUNBUFFERED=1
+
 EXPOSE 8000
+
+# Tell Render exactly how to start the app
+CMD ["python", "run.py"]
