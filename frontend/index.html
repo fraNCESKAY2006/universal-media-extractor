@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Universal Media Extractor</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" rel="stylesheet">
+  <style>
+    .slider-thumb::-webkit-slider-thumb {
+      appearance: none;
+      width: 16px;
+      height: 16px;
+      border-radius: 50%;
+      background: #ef4444;
+      cursor: pointer;
+    }
+  </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen flex flex-col items-center p-4 md:p-8">
+
+  <!-- Header -->
+  <header class="w-full max-w-4xl text-center my-6">
+    <div class="flex items-center justify-center gap-3">
+      <i class="fa-solid fa-bolt text-red-500 text-3xl"></i>
+      <h1 class="text-3xl font-extrabold tracking-tight">Universal Media Extractor</h1>
+    </div>
+    <p class="text-slate-400 mt-2">Zero ads. High bitrate MP3s with ID3 tags & Lossless 4K Video Muxing.</p>
+  </header>
+
+  <!-- Main Interaction Card -->
+  <main class="w-full max-w-3xl bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-2xl space-y-6">
+    
+    <!-- Input Section -->
+    <div class="flex gap-2">
+      <div class="relative flex-grow">
+        <input id="urlInput" type="text" placeholder="Paste YouTube or YouTube Music link..."
+          class="w-full pl-10 pr-24 py-3 bg-slate-950 border border-slate-700 rounded-xl focus:outline-none focus:border-red-500 text-sm md:text-base text-slate-100 placeholder-slate-500 transition-all"/>
+        <i class="fa-solid fa-link absolute left-3.5 top-4 text-slate-500 text-sm"></i>
+        <button id="pasteBtn" class="absolute right-2 top-2 px-3 py-1.5 bg-slate-800 hover:bg-slate-700 rounded-lg text-xs font-semibold text-slate-300 transition-colors">
+          <i class="fa-regular fa-clipboard"></i> Paste
+        </button>
+      </div>
+      <button id="inspectBtn" class="px-6 py-3 bg-red-600 hover:bg-red-700 rounded-xl font-bold transition flex items-center gap-2">
+        <span id="inspectSpinner" class="hidden"><i class="fa-solid fa-circle-notch fa-spin"></i></span>
+        <span>Inspect</span>
+      </button>
+    </div>
+
+    <!-- Media Card Details (Hidden until loaded) -->
+    <div id="mediaCard" class="hidden space-y-6 pt-4 border-t border-slate-800">
+      <div class="flex flex-col md:flex-row gap-5 items-center md:items-start">
+        <img id="mediaThumbnail" src="" class="w-48 h-28 object-cover rounded-xl shadow-lg border border-slate-800"/>
+        <div class="space-y-1 text-center md:text-left flex-1">
+          <h2 id="mediaTitle" class="text-lg font-bold line-clamp-2"></h2>
+          <p id="mediaAuthor" class="text-slate-400 text-sm"></p>
+          <p id="mediaDuration" class="text-xs text-slate-500 font-mono"></p>
+        </div>
+      </div>
+
+      <!-- Preview Player -->
+      <div class="w-full bg-slate-950 p-4 rounded-xl border border-slate-800 space-y-2">
+        <span class="text-xs uppercase tracking-wider font-bold text-slate-400">Stream Preview</span>
+        <audio id="audioPreview" controls class="w-full h-8 outline-none"></audio>
+      </div>
+
+      <!-- Trimming Controls -->
+      <div class="space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800">
+        <div class="flex items-center justify-between">
+          <label class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+            <input type="checkbox" id="trimToggle" class="accent-red-600 rounded cursor-pointer"/> Trim Media Clip
+          </label>
+          <div id="trimTimestamps" class="text-xs font-mono text-slate-400 space-x-2">
+            <span>Start: <span id="lblStart">00:00:00</span></span>
+            <span>End: <span id="lblEnd">00:00:00</span></span>
+          </div>
+        </div>
+        <div id="trimSliders" class="hidden flex gap-4 pt-2">
+          <input type="range" id="startRange" min="0" value="0" class="slider-thumb w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer">
+          <input type="range" id="endRange" min="0" value="100" class="slider-thumb w-full h-1 bg-slate-800 rounded-lg appearance-none cursor-pointer">
+        </div>
+      </div>
+
+      <!-- Quality Selection Grid -->
+      <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+        <!-- Audio Options -->
+        <div class="space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800">
+          <span class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+            <i class="fa-solid fa-music text-red-500"></i> Audio Extractor (ID3 Tagged)
+          </span>
+          <div class="flex flex-wrap gap-2 pt-2">
+            <button class="opt-btn px-3 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg border border-slate-700" data-type="audio" data-format="mp3" data-bitrate="320k">MP3 320kbps</button>
+            <button class="opt-btn px-3 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg border border-slate-700" data-type="audio" data-format="mp3" data-bitrate="192k">MP3 192kbps</button>
+            <button class="opt-btn px-3 py-2 bg-slate-800 hover:bg-slate-700 text-xs font-bold rounded-lg border border-slate-700" data-type="audio" data-format="wav">WAV Lossless</button>
+          </div>
+        </div>
+
+        <!-- Video Options -->
+        <div class="space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800">
+          <span class="text-xs font-bold uppercase tracking-wider text-slate-400 flex items-center gap-2">
+            <i class="fa-solid fa-video text-red-500"></i> Video Downloader
+          </span>
+          <div id="videoOptions" class="flex flex-wrap gap-2 pt-2">
+            <!-- Dynamically populated -->
+          </div>
+        </div>
+      </div>
+
+      <!-- Processing Progress UI -->
+      <div id="progressContainer" class="hidden space-y-2 bg-slate-950 p-4 rounded-xl border border-slate-800">
+        <div class="flex justify-between text-xs font-bold">
+          <span id="progressStage" class="text-slate-400">INITIALIZING...</span>
+          <span id="progressPercent" class="text-red-500">0%</span>
+        </div>
+        <div class="w-full bg-slate-800 h-2 rounded-full overflow-hidden">
+          <div id="progressBar" class="bg-red-600 h-full w-0 transition-all duration-300"></div>
+        </div>
+      </div>
+
+      <!-- Instant Direct Download Target -->
+      <div id="downloadContainer" class="hidden">
+        <a id="finalDownloadBtn" href="#" class="w-full block text-center py-3 bg-green-600 hover:bg-green-700 font-bold rounded-xl transition shadow-lg text-white">
+          <i class="fa-solid fa-download"></i> Save Extracted File
+        </a>
+      </div>
+    </div>
+  </main>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,288 @@
+import os
+import sys
+import subprocess
+import shutil
+
+# --- Auto-install required lightweight packages ---
+REQUIRED_LIBS = ["fastapi", "uvicorn", "yt-dlp", "mutagen", "requests", "sse-starlette"]
+missing = []
+for lib in REQUIRED_LIBS:
+    try:
+        __import__(lib.replace("-", "_"))
+    except ImportError:
+        missing.append(lib)
+
+if missing:
+    print(f"[*] Installing missing dependencies: {', '.join(missing)}...")
+    subprocess.check_call([sys.executable, "-m", "pip", "install", *missing])
+    print("[✓] Dependencies installed.\n")
+
+import re
+import json
+import asyncio
+import collections
+from typing import Dict, List, Optional
+from fastapi import FastAPI, HTTPException, Request, Query
+from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
+from sse_starlette.sse import EventSourceResponse
+import yt_dlp
+from mutagen.id3 import ID3, TIT2, TPE1, TALB, APIC, ID3NoHeaderError
+import requests
+import uvicorn
+
+# --- Setup Directories ---
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+STORAGE_DIR = os.path.join(BASE_DIR, "downloads")
+FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
+os.makedirs(STORAGE_DIR, exist_ok=True)
+
+# --- Ensure FFmpeg is accessible ---
+FFMPEG_CMD = shutil.which("ffmpeg") or "ffmpeg"
+
+def check_ffmpeg():
+    try:
+        subprocess.run([FFMPEG_CMD, "-version"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True
+    except FileNotFoundError:
+        return False
+
+# --- In-Memory Event Hub (Replaces Redis Pub/Sub) ---
+class EventBus:
+    def __init__(self):
+        self.channels: Dict[str, List[asyncio.Queue]] = collections.defaultdict(list)
+
+    def subscribe(self, job_id: str) -> asyncio.Queue:
+        q = asyncio.Queue()
+        self.channels[job_id].append(q)
+        return q
+
+    def unsubscribe(self, job_id: str, q: asyncio.Queue):
+        if job_id in self.channels and q in self.channels[job_id]:
+            self.channels[job_id].remove(q)
+            if not self.channels[job_id]:
+                del self.channels[job_id]
+
+    async def publish(self, job_id: str, data: dict):
+        if job_id in self.channels:
+            for q in self.channels[job_id]:
+                await q.put(data)
+
+event_bus = EventBus()
+
+# --- Metadata Tagging ---
+def inject_mp3_tags(file_path: str, title: str, artist: str, artwork_url: Optional[str]):
+    try:
+        try:
+            audio = ID3(file_path)
+        except ID3NoHeaderError:
+            audio = ID3()
+
+        audio.add(TIT2(encoding=3, text=title))
+        audio.add(TPE1(encoding=3, text=artist))
+        audio.add(TALB(encoding=3, text=title))
+
+        if artwork_url:
+            try:
+                img_data = requests.get(artwork_url, timeout=5).content
+                audio.add(APIC(encoding=3, mime='image/jpeg', type=3, desc='Cover', data=img_data))
+            except Exception:
+                pass
+
+        audio.save(file_path, v2_version=3)
+    except Exception as e:
+        print(f"[Tagger Error] {e}")
+
+# --- Background Task Worker (Replaces Celery) ---
+def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLoop):
+    def notify(stage: str, percent: int, download_url: Optional[str] = None):
+        msg = {"stage": stage, "percent": percent}
+        if download_url:
+            msg["download_url"] = download_url
+        asyncio.run_coroutine_threadsafe(event_bus.publish(job_id, msg), loop)
+
+    notify("INITIALIZING", 5)
+    url = payload["url"]
+    target_format = payload["target_format"]
+    resolution = payload.get("resolution")
+    trim = payload.get("trim", {})
+    start_time = trim.get("start") if trim.get("enabled") else None
+    end_time = trim.get("end") if trim.get("enabled") else None
+
+    # Resolve direct stream manifests
+    notify("RESOLVING_STREAMS", 10)
+    with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
+        info = ydl.extract_info(url, download=False)
+
+    duration = float(info.get("duration", 0))
+    video_url, audio_url = None, None
+
+    if target_format in ["mp3", "m4a", "wav"]:
+        for f in reversed(info.get("formats", [])):
+            if f.get("vcodec") == "none" and f.get("acodec") != "none":
+                audio_url = f.get("url")
+                break
+    else:
+        for f in reversed(info.get("formats", [])):
+            if not video_url and f.get("vcodec") != "none":
+                if resolution and (str(f.get("height")) in resolution or f.get("resolution") == resolution):
+                    video_url = f.get("url")
+            if not audio_url and f.get("vcodec") == "none" and f.get("acodec") != "none":
+                audio_url = f.get("url")
+
+    if not audio_url:
+        notify("FAILED", 0)
+        return
+
+    output_file = f"{job_id}.{target_format}"
+    output_path = os.path.join(STORAGE_DIR, output_file)
+
+    cmd = [FFMPEG_CMD, "-y", "-nostats", "-progress", "pipe:1"]
+    if start_time:
+        cmd.extend(["-ss", start_time])
+    if end_time:
+        cmd.extend(["-to", end_time])
+
+    if video_url:
+        cmd.extend(["-i", video_url])
+    cmd.extend(["-i", audio_url])
+
+    if target_format == "mp3":
+        cmd.extend(["-vn", "-codec:a", "libmp3lame", "-b:a", payload.get("bitrate", "320k"), "-ar", "44100"])
+    elif target_format == "m4a":
+        cmd.extend(["-vn", "-codec:a", "aac", "-b:a", payload.get("bitrate", "192k")])
+    elif target_format == "wav":
+        cmd.extend(["-vn", "-acodec", "pcm_s16le", "-ar", "44100"])
+    elif target_format == "mp4":
+        cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
+
+    cmd.append(output_path)
+
+    notify("PROCESSING", 20)
+    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+
+    time_regex = re.compile(r"out_time_ms=(\d+)")
+    for line in process.stdout:
+        m = time_regex.search(line)
+        if m and duration > 0:
+            elapsed_s = int(m.group(1)) / 1_000_000.0
+            p = min(90, 20 + int((elapsed_s / duration) * 70))
+            notify("PROCESSING", p)
+
+    process.wait()
+
+    if target_format == "mp3":
+        notify("TAGGING_METADATA", 95)
+        inject_mp3_tags(output_path, payload.get("title", "Media"), payload.get("artist", "Artist"), payload.get("thumbnail"))
+
+    safe_name = re.sub(r'[\\/*?:"<>|]', "", payload.get("title", "download"))
+    dl_url = f"/api/v1/download/{output_file}?name={safe_name}.{target_format}"
+    notify("COMPLETE", 100, download_url=dl_url)
+
+# --- FastAPI App ---
+app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+class ExtractReq(BaseModel):
+    url: str
+
+class TrimOptions(BaseModel):
+    enabled: bool = False
+    start: Optional[str] = None
+    end: Optional[str] = None
+
+class JobReq(BaseModel):
+    url: str
+    target_format: str
+    bitrate: str = "320k"
+    resolution: Optional[str] = None
+    title: str = "Media"
+    artist: str = "Artist"
+    thumbnail: Optional[str] = None
+    trim: TrimOptions = TrimOptions()
+
+@app.post("/api/v1/extract")
+async def extract(req: ExtractReq):
+    try:
+        with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
+            data = ydl.extract_info(req.url, download=False)
+        
+        direct_video = []
+        for f in data.get("formats", []):
+            if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("ext") == "mp4":
+                direct_video.append({
+                    "resolution": f.get("resolution") or f"{f.get('height')}p",
+                    "direct_url": f.get("url")
+                })
+
+        dash_res = ["1080p", "1440p", "2160p"]
+        muxed_video = [{"resolution": r} for r in dash_res if any(f.get("resolution") == r or str(f.get("height")) in r for f in data.get("formats", []))]
+
+        preview_audio = next((f["url"] for f in reversed(data.get("formats", [])) if f.get("vcodec") == "none" and f.get("acodec") != "none"), None)
+
+        return {
+            "title": data.get("title"),
+            "uploader": data.get("uploader"),
+            "duration": data.get("duration"),
+            "thumbnail": data.get("thumbnail"),
+            "preview_audio_url": preview_audio,
+            "direct_video": direct_video,
+            "muxed_video": muxed_video
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+@app.post("/api/v1/jobs")
+async def create_job(payload: JobReq):
+    import uuid
+    job_id = str(uuid.uuid4())
+    loop = asyncio.get_running_loop()
+    loop.run_in_executor(None, execute_ffmpeg_job, job_id, payload.model_dump(), loop)
+    return {"job_id": job_id}
+
+@app.get("/api/v1/jobs/{job_id}/events")
+async def job_events(job_id: str, request: Request):
+    async def sse():
+        q = event_bus.subscribe(job_id)
+        try:
+            while True:
+                if await request.is_disconnected():
+                    break
+                data = await q.get()
+                yield {"event": "progress", "data": json.dumps(data)}
+                if data.get("stage") == "COMPLETE":
+                    break
+        finally:
+            event_bus.unsubscribe(job_id, q)
+    return EventSourceResponse(sse())
+
+@app.get("/api/v1/download/{filename}")
+async def download(filename: str, name: str = Query("media")):
+    path = os.path.join(STORAGE_DIR, filename)
+    if not os.path.exists(path):
+        raise HTTPException(status_code=404, detail="File expired or missing.")
+    return FileResponse(path, filename=name, media_type="application/octet-stream")
+
+if os.path.exists(FRONTEND_DIR):
+    app.mount("/", StaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")
+
+if __name__ == "__main__":
+    if not check_ffmpeg():
+        print("\n" + "="*70)
+        print("⚠️  CRITICAL: FFmpeg was not detected on your system!")
+        print("Run this command in PowerShell to install it immediately:")
+        print("    winget install Gyan.FFmpeg")
+        print("="*70 + "\n")
+    
+    print("\n🚀 Universal Media Extractor is live!")
+    print("👉 Open your browser to: http://localhost:8000\n")
+    uvicorn.run(app, host="127.0.0.1", port=8000)
