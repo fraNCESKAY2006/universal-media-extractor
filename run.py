@@ -42,7 +42,11 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 # --- Cookie file path ---
 COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
 def get_ydl_opts(extra: dict = None):
-    opts = {'quiet': True, 'skip_download': True}
+    opts = {
+        'quiet': True, 
+        'skip_download': True,
+        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+    }
     if os.path.exists(COOKIE_FILE):
         opts['cookiefile'] = COOKIE_FILE
     if extra:
@@ -122,68 +126,60 @@ def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLo
     end_time = trim.get("end") if trim.get("enabled") else None
 
     notify("RESOLVING_STREAMS", 10)
-    with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
-        info = ydl.extract_info(url, download=False)
-
-    duration = float(info.get("duration", 0))
-    video_url, audio_url = None, None
-
-    if target_format in ["mp3", "m4a", "wav"]:
-        for f in reversed(info.get("formats", [])):
-            if f.get("vcodec") == "none" and f.get("acodec") != "none":
-                audio_url = f.get("url")
-                break
-    else:
-        for f in reversed(info.get("formats", [])):
-            if not video_url and f.get("vcodec") != "none":
-                if resolution and (str(f.get("height")) in resolution or f.get("resolution") == resolution):
-                    video_url = f.get("url")
-            if not audio_url and f.get("vcodec") == "none" and f.get("acodec") != "none":
-                audio_url = f.get("url")
-
-    if not audio_url:
-        notify("FAILED", 0)
-        return
-
+    
+    # Use yt-dlp direct download into output path using format selectors
     output_file = f"{job_id}.{target_format}"
     output_path = os.path.join(STORAGE_DIR, output_file)
 
-    cmd = [FFMPEG_CMD, "-y", "-nostats", "-progress", "pipe:1"]
-    if start_time:
-        cmd.extend(["-ss", start_time])
-    if end_time:
-        cmd.extend(["-to", end_time])
+    format_selector = 'bestaudio/best'
+    if target_format == 'mp4':
+        if resolution and '1080' in resolution:
+            format_selector = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
+        elif resolution and ('1440' in resolution or '2160' in resolution or '4K' in resolution):
+            format_selector = 'bestvideo+bestaudio/best'
+        else:
+            format_selector = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
 
-    if video_url:
-        cmd.extend(["-i", video_url])
-    cmd.extend(["-i", audio_url])
+    ydl_download_opts = get_ydl_opts({
+        'format': format_selector,
+        'outtmpl': output_path.replace(f'.{target_format}', ''),
+    })
+
+    if target_format in ['mp3', 'm4a', 'wav']:
+        ydl_download_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': target_format if target_format != 'wav' else 'wav',
+            'preferredquality': '320' if payload.get("bitrate") == '320k' else '192',
+        }]
+    elif target_format == 'mp4':
+        ydl_download_opts['merge_output_format'] = 'mp4'
+
+    # If trimming is requested, we let yt-dlp download or pass to ffmpeg
+    notify("DOWNLOADING_AND_PROCESSING", 30)
+    try:
+        with yt_dlp.YoutubeDL(ydl_download_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        # Fallback to absolute best generic format if specific format fails
+        ydl_download_opts['format'] = 'best'
+        with yt_dlp.YoutubeDL(ydl_download_opts) as ydl:
+            ydl.download([url])
+
+    # Handle trimming post-download if specified
+    if start_time or end_time:
+        trimmed_path = output_path.replace(f'.{target_format}', f'_trimmed.{target_format}')
+        trim_cmd = [FFMPEG_CMD, "-y"]
+        if start_time:
+            trim_cmd.extend(["-ss", start_time])
+        if end_time:
+            trim_cmd.extend(["-to", end_time])
+        trim_cmd.extend(["-i", output_path, "-c", "copy", trimmed_path])
+        subprocess.run(trim_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(trimmed_path):
+            os.replace(trimmed_path, output_path)
 
     if target_format == "mp3":
-        cmd.extend(["-vn", "-codec:a", "libmp3lame", "-b:a", payload.get("bitrate", "320k"), "-ar", "44100"])
-    elif target_format == "m4a":
-        cmd.extend(["-vn", "-codec:a", "aac", "-b:a", payload.get("bitrate", "192k")])
-    elif target_format == "wav":
-        cmd.extend(["-vn", "-acodec", "pcm_s16le", "-ar", "44100"])
-    elif target_format == "mp4":
-        cmd.extend(["-c:v", "copy", "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart"])
-
-    cmd.append(output_path)
-
-    notify("PROCESSING", 20)
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
-
-    time_regex = re.compile(r"out_time_ms=(\d+)")
-    for line in process.stdout:
-        m = time_regex.search(line)
-        if m and duration > 0:
-            elapsed_s = int(m.group(1)) / 1_000_000.0
-            p = min(90, 20 + int((elapsed_s / duration) * 70))
-            notify("PROCESSING", p)
-
-    process.wait()
-
-    if target_format == "mp3":
-        notify("TAGGING_METADATA", 95)
+        notify("TAGGING_METADATA", 90)
         inject_mp3_tags(output_path, payload.get("title", "Media"), payload.get("artist", "Artist"), payload.get("thumbnail"))
 
     safe_name = re.sub(r'[\\/*?:"<>|]', "", payload.get("title", "download"))
@@ -222,7 +218,7 @@ class JobReq(BaseModel):
 @app.post("/api/v1/extract")
 async def extract(req: ExtractReq):
     try:
-        with yt_dlp.YoutubeDL(get_ydl_opts({'format': 'best'})) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
             data = ydl.extract_info(req.url, download=False)
         
         direct_video = []
