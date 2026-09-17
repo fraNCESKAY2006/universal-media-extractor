@@ -43,7 +43,7 @@ os.makedirs(STORAGE_DIR, exist_ok=True)
 COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
 def get_ydl_opts(extra: dict = None):
     opts = {
-        'quiet': True, 
+        'quiet': True,
         'skip_download': True,
         'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
     }
@@ -120,28 +120,18 @@ def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLo
     notify("INITIALIZING", 5)
     url = payload["url"]
     target_format = payload["target_format"]
-    resolution = payload.get("resolution")
     trim = payload.get("trim", {})
     start_time = trim.get("start") if trim.get("enabled") else None
     end_time = trim.get("end") if trim.get("enabled") else None
 
     notify("RESOLVING_STREAMS", 10)
     
-    # Use yt-dlp direct download into output path using format selectors
     output_file = f"{job_id}.{target_format}"
     output_path = os.path.join(STORAGE_DIR, output_file)
 
-    format_selector = 'bestaudio/best'
-    if target_format == 'mp4':
-        if resolution and '1080' in resolution:
-            format_selector = 'bestvideo[height<=1080]+bestaudio/best[height<=1080]'
-        elif resolution and ('1440' in resolution or '2160' in resolution or '4K' in resolution):
-            format_selector = 'bestvideo+bestaudio/best'
-        else:
-            format_selector = 'bestvideo[height<=720]+bestaudio/best[height<=720]'
-
+    # Use robust fallback format selection
     ydl_download_opts = get_ydl_opts({
-        'format': format_selector,
+        'format': 'best',
         'outtmpl': output_path.replace(f'.{target_format}', ''),
     })
 
@@ -154,16 +144,9 @@ def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLo
     elif target_format == 'mp4':
         ydl_download_opts['merge_output_format'] = 'mp4'
 
-    # If trimming is requested, we let yt-dlp download or pass to ffmpeg
     notify("DOWNLOADING_AND_PROCESSING", 30)
-    try:
-        with yt_dlp.YoutubeDL(ydl_download_opts) as ydl:
-            ydl.download([url])
-    except Exception as e:
-        # Fallback to absolute best generic format if specific format fails
-        ydl_download_opts['format'] = 'best'
-        with yt_dlp.YoutubeDL(ydl_download_opts) as ydl:
-            ydl.download([url])
+    with yt_dlp.YoutubeDL(ydl_download_opts) as ydl:
+        ydl.download([url])
 
     # Handle trimming post-download if specified
     if start_time or end_time:
@@ -218,7 +201,7 @@ class JobReq(BaseModel):
 @app.post("/api/v1/extract")
 async def extract(req: ExtractReq):
     try:
-        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts({'format': 'best'})) as ydl:
             data = ydl.extract_info(req.url, download=False)
         
         direct_video = []
