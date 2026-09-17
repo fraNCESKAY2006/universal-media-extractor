@@ -222,28 +222,39 @@ class JobReq(BaseModel):
 @app.post("/api/v1/extract")
 async def extract(req: ExtractReq):
     try:
-        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts({'format': 'best'})) as ydl:
             data = ydl.extract_info(req.url, download=False)
         
         direct_video = []
-        for f in data.get("formats", []):
+        formats = data.get("formats", [])
+        
+        for f in formats:
             if f.get("vcodec") != "none" and f.get("acodec") != "none" and f.get("ext") == "mp4":
+                res = f.get("resolution") or f"{f.get('height')}p"
                 direct_video.append({
-                    "resolution": f.get("resolution") or f"{f.get('height')}p",
+                    "resolution": res,
                     "direct_url": f.get("url")
                 })
 
+        seen_res = set()
+        unique_direct_video = []
+        for v in direct_video:
+            if v["resolution"] not in seen_res:
+                seen_res.add(v["resolution"])
+                unique_direct_video.append(v)
+
         dash_res = ["1080p", "1440p", "2160p"]
-        muxed_video = [{"resolution": r} for r in dash_res if any(f.get("resolution") == r or str(f.get("height")) in r for f in data.get("formats", []))]
-        preview_audio = next((f["url"] for f in reversed(data.get("formats", [])) if f.get("vcodec") == "none" and f.get("acodec") != "none"), None)
+        muxed_video = [{"resolution": r} for r in dash_res if any(r.split()[0] in str(f.get("height", "")) for f in formats)]
+        
+        preview_audio = next((f["url"] for f in reversed(formats) if f.get("vcodec") == "none" and f.get("acodec") != "none"), None)
 
         return {
-            "title": data.get("title"),
-            "uploader": data.get("uploader"),
-            "duration": data.get("duration"),
-            "thumbnail": data.get("thumbnail"),
+            "title": data.get("title", "Unknown Title"),
+            "uploader": data.get("uploader", "Unknown Uploader"),
+            "duration": data.get("duration", 0),
+            "thumbnail": data.get("thumbnail", ""),
             "preview_audio_url": preview_audio,
-            "direct_video": direct_video,
+            "direct_video": unique_direct_video,
             "muxed_video": muxed_video
         }
     except Exception as e:
