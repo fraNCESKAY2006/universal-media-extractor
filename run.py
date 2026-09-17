@@ -110,7 +110,77 @@ def inject_mp3_tags(file_path: str, title: str, artist: str, artwork_url: Option
         print(f"[Tagger Error] {e}")
 
 # --- Background Task Worker ---
+# --- Background Task Worker (Bulletproof Bypass) ---
 def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLoop):
+    def notify(stage: str, percent: int, download_url: Optional[str] = None):
+        msg = {"stage": stage, "percent": percent}
+        if download_url:
+            msg["download_url"] = download_url
+        asyncio.run_coroutine_threadsafe(event_bus.publish(job_id, msg), loop)
+
+    notify("INITIALIZING", 5)
+    url = payload["url"]
+    target_format = payload["target_format"]
+    trim = payload.get("trim", {})
+    start_time = trim.get("start") if trim.get("enabled") else None
+    end_time = trim.get("end") if trim.get("enabled") else None
+
+    notify("DOWNLOADING_MEDIA", 20)
+    
+    output_file = f"{job_id}.{target_format}"
+    output_path = os.path.join(STORAGE_DIR, output_file)
+
+    # Let yt-dlp handle everything automatically without picking fragile formats
+    ydl_opts = get_ydl_opts({
+        'outtmpl': output_path.replace(f'.{target_format}', ''),
+    })
+
+    if target_format in ['mp3', 'm4a', 'wav']:
+        ydl_opts['format'] = 'bestaudio/best'
+        ydl_opts['postprocessors'] = [{
+            'key': 'FFmpegExtractAudio',
+            'preferredcodec': target_format if target_format != 'wav' else 'wav',
+            'preferredquality': '320' if payload.get("bitrate") == '320k' else '192',
+        }]
+    else:
+        ydl_opts['format'] = 'best'
+        ydl_opts['merge_output_format'] = 'mp4'
+
+    try:
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+    except Exception as e:
+        # Fallback raw download
+        ydl_opts['format'] = 'bv*+ba/b'
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            ydl.download([url])
+
+    # Handle trimming if specified
+    if start_time or end_time:
+        notify("TRIMMING", 85)
+        trimmed_path = output_path.replace(f'.{target_format}', f'_trimmed.{target_format}')
+        trim_cmd = [FFMPEG_CMD, "-y"]
+        if start_time:
+            trim_cmd.extend(["-ss", start_time])
+        if end_time:
+            trim_cmd.extend(["-to", end_time])
+        trim_cmd.extend(["-i", output_path, "-c", "copy", trimmed_path])
+        subprocess.run(trim_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        if os.path.exists(trimmed_path):
+            os.replace(trimmed_path, output_path)
+
+    if target_format == "mp3":
+        notify("TAGGING_METADATA", 95)
+        try:
+            with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
+                info = ydl.extract_info(url, download=False)
+            inject_mp3_tags(output_path, info.get("title", "Media"), info.get("uploader", "Artist"), info.get("thumbnail"))
+        except:
+            pass
+
+    safe_name = "media"
+    dl_url = f"/api/v1/download/{output_file}?name={safe_name}.{target_format}"
+    notify("COMPLETE", 100, download_url=dl_url)
     def notify(stage: str, percent: int, download_url: Optional[str] = None):
         msg = {"stage": stage, "percent": percent}
         if download_url:
