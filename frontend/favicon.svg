@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ef4444" />
+      <stop offset="100%" stop-color="#b91c1c" />
+    </linearGradient>
+  </defs>
+  <!-- Background Rounded Square -->
+  <rect width="64" height="64" rx="16" fill="#090d16" />
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="none" stroke="#1e293b" stroke-width="3" />
+  
+  <!-- Media Play Triangle / Download Arrow Core & Lightning Bolt -->
+  <path d="M38 10L18 36H32L26 54L48 26H34L38 10Z" fill="url(#grad)" />
+</svg>
