@@ -39,13 +39,17 @@ STORAGE_DIR = os.path.join(BASE_DIR, "downloads")
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
-# --- Cookie file path ---
+# --- Cookie file path & robust client emulation ---
 COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
 def get_ydl_opts(extra: dict = None):
     opts = {
         'quiet': True,
         'skip_download': True,
-        'extractor_args': {'youtube': {'player_client': ['android', 'web']}}
+        'extractor_args': {
+            'youtube': {
+                'player_client': ['tv_embedded', 'android', 'web']
+            }
+        }
     }
     if os.path.exists(COOKIE_FILE):
         opts['cookiefile'] = COOKIE_FILE
@@ -109,7 +113,6 @@ def inject_mp3_tags(file_path: str, title: str, artist: str, artwork_url: Option
     except Exception as e:
         print(f"[Tagger Error] {e}")
 
-# --- Background Task Worker ---
 # --- Background Task Worker (Bulletproof Bypass) ---
 def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLoop):
     def notify(stage: str, percent: int, download_url: Optional[str] = None):
@@ -130,7 +133,6 @@ def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLo
     output_file = f"{job_id}.{target_format}"
     output_path = os.path.join(STORAGE_DIR, output_file)
 
-    # Let yt-dlp handle everything automatically without picking fragile formats
     ydl_opts = get_ydl_opts({
         'outtmpl': output_path.replace(f'.{target_format}', ''),
     })
@@ -150,12 +152,10 @@ def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLo
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except Exception as e:
-        # Fallback raw download
         ydl_opts['format'] = 'bv*+ba/b'
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
 
-    # Handle trimming if specified
     if start_time or end_time:
         notify("TRIMMING", 85)
         trimmed_path = output_path.replace(f'.{target_format}', f'_trimmed.{target_format}')
@@ -179,63 +179,6 @@ def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLo
             pass
 
     safe_name = "media"
-    dl_url = f"/api/v1/download/{output_file}?name={safe_name}.{target_format}"
-    notify("COMPLETE", 100, download_url=dl_url)
-    def notify(stage: str, percent: int, download_url: Optional[str] = None):
-        msg = {"stage": stage, "percent": percent}
-        if download_url:
-            msg["download_url"] = download_url
-        asyncio.run_coroutine_threadsafe(event_bus.publish(job_id, msg), loop)
-
-    notify("INITIALIZING", 5)
-    url = payload["url"]
-    target_format = payload["target_format"]
-    trim = payload.get("trim", {})
-    start_time = trim.get("start") if trim.get("enabled") else None
-    end_time = trim.get("end") if trim.get("enabled") else None
-
-    notify("RESOLVING_STREAMS", 10)
-    
-    output_file = f"{job_id}.{target_format}"
-    output_path = os.path.join(STORAGE_DIR, output_file)
-
-    # Use robust fallback format selection
-    ydl_download_opts = get_ydl_opts({
-        'format': 'best',
-        'outtmpl': output_path.replace(f'.{target_format}', ''),
-    })
-
-    if target_format in ['mp3', 'm4a', 'wav']:
-        ydl_download_opts['postprocessors'] = [{
-            'key': 'FFmpegExtractAudio',
-            'preferredcodec': target_format if target_format != 'wav' else 'wav',
-            'preferredquality': '320' if payload.get("bitrate") == '320k' else '192',
-        }]
-    elif target_format == 'mp4':
-        ydl_download_opts['merge_output_format'] = 'mp4'
-
-    notify("DOWNLOADING_AND_PROCESSING", 30)
-    with yt_dlp.YoutubeDL(ydl_download_opts) as ydl:
-        ydl.download([url])
-
-    # Handle trimming post-download if specified
-    if start_time or end_time:
-        trimmed_path = output_path.replace(f'.{target_format}', f'_trimmed.{target_format}')
-        trim_cmd = [FFMPEG_CMD, "-y"]
-        if start_time:
-            trim_cmd.extend(["-ss", start_time])
-        if end_time:
-            trim_cmd.extend(["-to", end_time])
-        trim_cmd.extend(["-i", output_path, "-c", "copy", trimmed_path])
-        subprocess.run(trim_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        if os.path.exists(trimmed_path):
-            os.replace(trimmed_path, output_path)
-
-    if target_format == "mp3":
-        notify("TAGGING_METADATA", 90)
-        inject_mp3_tags(output_path, payload.get("title", "Media"), payload.get("artist", "Artist"), payload.get("thumbnail"))
-
-    safe_name = re.sub(r'[\\/*?:"<>|]', "", payload.get("title", "download"))
     dl_url = f"/api/v1/download/{output_file}?name={safe_name}.{target_format}"
     notify("COMPLETE", 100, download_url=dl_url)
 
