@@ -4,7 +4,7 @@ import subprocess
 import shutil
 
 # --- Auto-install required lightweight packages ---
-REQUIRED_LIBS = ["fastapi", "uvicorn", "yt-dlp", "mutagen", "requests", "sse-starlette"]
+REQUIRED_LIBS = ["fastapi", "uvicorn", "yt-dlp", "mutagen", "requests", "sse-starlette", "curl_cffi"]
 missing = []
 for lib in REQUIRED_LIBS:
     try:
@@ -39,6 +39,16 @@ STORAGE_DIR = os.path.join(BASE_DIR, "downloads")
 FRONTEND_DIR = os.path.join(BASE_DIR, "frontend")
 os.makedirs(STORAGE_DIR, exist_ok=True)
 
+# --- Cookie file path ---
+COOKIE_FILE = os.path.join(BASE_DIR, "cookies.txt")
+def get_ydl_opts(extra: dict = None):
+    opts = {'quiet': True, 'skip_download': True}
+    if os.path.exists(COOKIE_FILE):
+        opts['cookiefile'] = COOKIE_FILE
+    if extra:
+        opts.update(extra)
+    return opts
+
 # --- Ensure FFmpeg is accessible ---
 FFMPEG_CMD = shutil.which("ffmpeg") or "ffmpeg"
 
@@ -49,7 +59,7 @@ def check_ffmpeg():
     except FileNotFoundError:
         return False
 
-# --- In-Memory Event Hub (Replaces Redis Pub/Sub) ---
+# --- In-Memory Event Hub ---
 class EventBus:
     def __init__(self):
         self.channels: Dict[str, List[asyncio.Queue]] = collections.defaultdict(list)
@@ -95,7 +105,7 @@ def inject_mp3_tags(file_path: str, title: str, artist: str, artwork_url: Option
     except Exception as e:
         print(f"[Tagger Error] {e}")
 
-# --- Background Task Worker (Replaces Celery) ---
+# --- Background Task Worker ---
 def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLoop):
     def notify(stage: str, percent: int, download_url: Optional[str] = None):
         msg = {"stage": stage, "percent": percent}
@@ -111,9 +121,8 @@ def execute_ffmpeg_job(job_id: str, payload: dict, loop: asyncio.AbstractEventLo
     start_time = trim.get("start") if trim.get("enabled") else None
     end_time = trim.get("end") if trim.get("enabled") else None
 
-    # Resolve direct stream manifests
     notify("RESOLVING_STREAMS", 10)
-    with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
+    with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
         info = ydl.extract_info(url, download=False)
 
     duration = float(info.get("duration", 0))
@@ -213,7 +222,7 @@ class JobReq(BaseModel):
 @app.post("/api/v1/extract")
 async def extract(req: ExtractReq):
     try:
-        with yt_dlp.YoutubeDL({'quiet': True, 'skip_download': True}) as ydl:
+        with yt_dlp.YoutubeDL(get_ydl_opts()) as ydl:
             data = ydl.extract_info(req.url, download=False)
         
         direct_video = []
@@ -226,7 +235,6 @@ async def extract(req: ExtractReq):
 
         dash_res = ["1080p", "1440p", "2160p"]
         muxed_video = [{"resolution": r} for r in dash_res if any(f.get("resolution") == r or str(f.get("height")) in r for f in data.get("formats", []))]
-
         preview_audio = next((f["url"] for f in reversed(data.get("formats", [])) if f.get("vcodec") == "none" and f.get("acodec") != "none"), None)
 
         return {
@@ -269,7 +277,7 @@ async def job_events(job_id: str, request: Request):
 async def download(filename: str, name: str = Query("media")):
     path = os.path.join(STORAGE_DIR, filename)
     if not os.path.exists(path):
-        raise HTTPException(status_code=404, detail="File expired or missing.")
+        raise HTTPException(status_code=404, detail="File expired.")
     return FileResponse(path, filename=name, media_type="application/octet-stream")
 
 if os.path.exists(FRONTEND_DIR):
@@ -277,13 +285,8 @@ if os.path.exists(FRONTEND_DIR):
 
 if __name__ == "__main__":
     if not check_ffmpeg():
-        print("\n" + "="*70)
-        print("⚠️  CRITICAL: FFmpeg was not detected on your system!")
-        print("Run this command in PowerShell to install it immediately:")
-        print("    winget install Gyan.FFmpeg")
-        print("="*70 + "\n")
+        print("\n⚠️  WARNING: FFmpeg not found on system PATH!\n")
     
-    print("\n🚀 Universal Media Extractor is live!")
-    print("👉 Open your browser to: http://localhost:8000\n")
     port = int(os.environ.get("PORT", 8000))
+    print(f"\n🚀 Universal Media Extractor is live on http://0.0.0.0:{port}\n")
     uvicorn.run(app, host="0.0.0.0", port=port)

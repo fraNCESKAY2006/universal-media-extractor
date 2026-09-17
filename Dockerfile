@@ -17,5 +17,5 @@ ENV PYTHONUNBUFFERED=1
 
 EXPOSE 8000
 
-# Tell Render exactly how to start the app
+# Runs run.py automatically
 CMD ["python", "run.py"]
